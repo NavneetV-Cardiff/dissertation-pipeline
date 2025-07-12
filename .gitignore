@@ -1,0 +1,17 @@
+# Ignore FASTQ files
+*.fastq
+*.fastq.gz
+
+# Ignore BWA index files
+*.amb
+*.ann
+*.bwt
+*.pac
+*.sa
+
+# Ignore temporary files
+*.tmp
+*.log
+
+# Ignore directories
+/data/
