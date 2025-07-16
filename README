@@ -1,2 +1,3 @@
-This is the initial commit. 
-The quick brown fox jumps over the lazy dog. 
+This project aims to deliver a working pipeline to process Exome-seq data into annotated .vcf files. 
+
+This will then be tested on breast cancer data. 
