@@ -7,7 +7,7 @@
 *.ann
 *.bwt
 *.pac
-*.sa
+*.sra
 
 # Ignore temporary files
 *.tmp
