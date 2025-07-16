@@ -169,6 +169,71 @@ gatk BaseRecalibrator -I ERR166333.slim.sorted.markdup.rg.bam -R Homo_sapiens.GR
 gatk ApplyBQSR -R Homo_sapiens.GRCh38.dna_sm.slim.fa -I ERR166333.slim.sorted.markdup.rg.bam --bqsr-recal-file ERR166333.recal_data.table -O ERR166333.slim.sorted.markdup.rg.recal.bam
 
 
+
 ####
+
+
+#### STEP 11
+# Calling variants
+module load GATK/4.1.2.0 
+
+module load java/1.8
+
+#
+gatk --java-options "-Xmx4g" HaplotypeCaller -R Homo_sapiens.GRCh38.dna_sm.slim.fa -I ERR166333.slim.sorted.markdup.rg.recal.bam -O ERR166333.slim.vcf.gz 
+
+ls ERR166333.slim.vcf.gz 
+
+
+
+####
+
+
+#### Step 12
+# Filter variants
+module load GATK/4.1.2.0 
+
+module load java/1.8 
+gatk SelectVariants --variant ERR166333.slim.vcf.gz --select-type SNP --output ERR166333.slim.snp.vcf.gz 
+gatk VariantFiltration  --variant ERR166333.slim.snp.vcf.gz --filter-expression "QD<2.0" --filter-name "QD2" --filter-expression "QUAL<30.0" --filter-name "QUAL30"  --filter-expression "SOR>3.0" --filter-name "SOR3" --filter-expression "FS>60.0" --filter-name "FS60" --filter-expression "MQ<40.0" --filter-name "MQ40" --filter-expression "MQRankSum<-12.5" --filter-name "MQRankSum-12.5" --filter-expression "ReadPosRankSum<-8.0" --filter-name "ReadPosRankSum-8" --output ERR166333.slim.snp.filtered.vcf.gz
+
+
+
+####
+
+#### STEP 13
+#
+module load GATK/4.1.2.0 
+
+module load java/1.8 
+
+# Download reference .idx files from 1000genomes project
+
+wget https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf 
+
+ 
+
+wget https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf.idx
+
+# Calculate posterior probabilities
+gatk --java-options "-Xmx4g" CalculateGenotypePosteriors -V ERR166333.slim.snp.filtered.vcf.gz -O ERR166333.slim.snp.filtered.ref.vcf.gz -supporting 1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf
+
+####
+
+
+#### STEP 14
+# Annotate variants
+
+gatk FuncotatorDataSourceDownloader --germline --validate-integrity --extract-after-download 
+
+# Run funcotator to add gene annotations to vcf
+gatk Funcotator --variant ERR166333.slim.snp.filtered.ref.vcf.gz --reference Homo_sapiens.GRCh38.dna_sm.slim.fa --ref-version hg38 --data-sources-path funcotator_dataSources.v1.6.20190124g --output ERR166333.slim.snp.filtered.ref.annot.vcf.gz --output-file-format VCF 
+
+
+
+####
+
+
+
 
 
