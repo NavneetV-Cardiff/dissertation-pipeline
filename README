@@ -2,4 +2,4 @@ This project aims to deliver a working pipeline to process Exome-seq data into a
 
 This will then be tested on breast cancer data. 
 
-The pipeline can be found at ExomeSeq/main.nf
+The pipeline can be found at ExomeSeq/
