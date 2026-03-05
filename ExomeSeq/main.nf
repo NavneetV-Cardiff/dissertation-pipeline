@@ -1,855 +1,569 @@
-//==============================================================================
-// NEXTFLOW PIPELINE FOR BREAST CANCER SUSCEPTIBILITY GENE VARIANT ANALYSIS
-// Adapted from GATK Best Practices for targeted exome sequencing analysis
-//==============================================================================
+#!/usr/bin/env nextflow
 
-//------------------------------------------------------------------------------
-// PIPELINE PARAMETERS CONFIGURATION
-//------------------------------------------------------------------------------
-// Reference genome file (GRCh38 assembly, slim version for reduced size)
-params.fasta_file = 'Homo_sapiens.GRCh38.dna_sm.slim.fa'
+//this is the final version
+params.fastq_id = ["ERR166333", "ERR166337"]
+params.adapter_file = "/shared/home1/c.c24053373/pipeline/data/TruSeq-PE.fa"
+params.out_dir = "/scratch/SCWF00079/shared/navneet/pipeline/output1"
 
-// Input sample identifier - currently configured for single sample analysis
-params.fastq_id = ["ERR166333"]
+//include { download_reference } from './modules/download_reference.nf'
+//include { edit_ref_genome } from './modules/edit_ref_genome.nf'
 
-// Base directory for reference files and output storage
-params.index_dir = '/scratch/c.c24053373/test'
 
-// Input VCF file path for variant filtering process
-params.filtered_vcf_file = 'ERR166333_1.trimmed.fastq.sorted.markdup.rg.recal.vcf.gz'
-
-// Population reference VCF for genotype posterior calculation (1000 Genomes data)
-params.supporting_vcf = '1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf'
-
-// Final filtered VCF file path for downstream processing
-params.final_vcf = 'ERR166333_1.trimmed.fastq.sorted.markdup.rg.recal.snp.filtered.vcf.gz'
-
-// Known variants VCF for base quality recalibration (Mills and 1000G gold standard)
-params.vcf_file = 'Mills_and_1000G_gold_standard.indels.hg38.vcf'
-
-// ANNOVAR database directory for variant functional annotation
-params.annovar_db = '/scratch/c.c24053373/test/annovar/annovar/humandb'
-
-//==============================================================================
-// PROCESS DEFINITIONS - QUALITY CONTROL AND PREPROCESSING
-//==============================================================================
-
-/**
- * PROCESS: fastqTrim
- * PURPOSE: Remove low-quality bases and adapter sequences from raw FASTQ files
- * TOOL: Trimmomatic v0.39
- * INPUT: Paired-end FASTQ files (R1 and R2)
- * OUTPUT: Quality-trimmed FASTQ files (paired and unpaired)
- */
-process fastqTrim{
-    input:
-    tuple path(fastq_1), path (fastq_2)  // Paired-end FASTQ input files
-
-    output:
-    path "*.trimmed.fastq.gz"            // Trimmed FASTQ output files
-
-    script:
-    """
-    # Load required Java environment for Trimmomatic
-    module load java/1.8
-
-    # Trimmomatic paired-end trimming with quality and adapter filtering
-    # PE: Paired-end mode
-    # -phred33: Quality score encoding format
-    # ILLUMINACLIP: Remove Illumina adapter sequences (TruSeq adapters)
-    # LEADING:3: Remove leading low quality bases (below quality 3)
-    # TRAILING:3: Remove trailing low quality bases (below quality 3)
-    # SLIDINGWINDOW:4:15: Sliding window trimming (window size 4, avg quality 15)
-    # MINLEN:36: Drop reads shorter than 36 bases after trimming
-    java -jar /apps/genomics/trimmomatic/0.39/trimmomatic-0.39.jar PE -phred33 \
-    ${fastq_1} ${fastq_2} \
-    ${fastq_1.baseName}.trimmed.fastq.gz ${fastq_1.baseName}.unpaired.fastq.gz \
-    ${fastq_2.baseName}.trimmed.fastq.gz ${fastq_2.baseName}.unpaired.fastq.gz \
-    ILLUMINACLIP:/scratch/c.c24053373/test/TruSeq-PE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
-    """
-}
-
-/**
- * PROCESS: FASTQC
- * PURPOSE: Generate quality control reports for sequencing data
- * TOOL: FastQC v0.11.8
- * INPUT: Trimmed FASTQ files
- * OUTPUT: Quality control reports (HTML and ZIP formats)
- */
-process FASTQC{
-    // Publish results to output directory for review
-    publishDir params.index_dir, mode: 'copy'
-
-    input:
-    path fastq_files                     // Trimmed FASTQ files for QC analysis
-
-    output:
-    path "*fastqc.zip"                   // Compressed QC data
-    path "*fastqc.html"                  // Human-readable QC reports
-
-    script:
-    """
-    # Load FastQC module
-    module load FastQC/0.11.8
-    
-    # Generate quality control reports for all input FASTQ files
-    fastqc ${fastq_files.join(' ')}
-    """
-}
-
-//==============================================================================
-// PROCESS DEFINITIONS - READ ALIGNMENT AND PROCESSING
-//==============================================================================
-
-/**
- * PROCESS: genomeMap
- * PURPOSE: Align trimmed reads to reference genome
- * TOOL: BWA-MEM v0.7.17
- * INPUT: Reference genome directory, FASTA filename, trimmed paired-end reads
- * OUTPUT: SAM alignment file
- */
-process genomeMap{
-    input:
-    path data_dir                        // Directory containing reference genome
-    val fasta_file                       // Reference genome filename
-    tuple path(trimmed_fastq_1), path(trimmed_fastq_2)  // Trimmed paired-end reads
-
-    output:
-    path "*.sam"                         // SAM alignment output
-
-    script:
-    """
-    # Load BWA alignment tool
-    module load bwa/0.7.17
-    
-    # BWA-MEM alignment: Map paired-end reads to reference genome
-    # mem: BWA-MEM algorithm (optimized for 70-100bp reads)
-    # Output redirected to SAM format file
-    bwa mem ${data_dir}/${fasta_file} ${trimmed_fastq_1} ${trimmed_fastq_2} > ${trimmed_fastq_1.baseName}.sam
-    """
-}
-
-/**
- * PROCESS: sortBam
- * PURPOSE: Sort SAM file by genomic coordinates and convert to BAM format
- * TOOL: SAMtools v1.17
- * INPUT: SAM alignment file
- * OUTPUT: Coordinate-sorted BAM file
- */
-process sortBam{
-    input:
-    path sam_file                        // Input SAM alignment file
-
-    output:
-    path "*.sorted.bam"                  // Coordinate-sorted BAM output
-
-    script:
-    """
-    # Load SAMtools for BAM manipulation
-    module load samtools/1.17
-    
-    # Sort SAM file by genomic coordinates and convert to compressed BAM format
-    # -o: Output filename
-    samtools sort -o ${sam_file.baseName}.sorted.bam ${sam_file}
-    """
-}
-
-/**
- * PROCESS: markDuplicates
- * PURPOSE: Identify and mark PCR/optical duplicate reads
- * TOOL: Picard MarkDuplicates v2.27.5
- * INPUT: Coordinate-sorted BAM file
- * OUTPUT: BAM file with duplicates marked
- * NOTE: Duplicates are marked but not removed (REMOVE_DUPLICATES=false)
- */
-process markDuplicates{
-    input:
-    path sorted_bam_file                 // Sorted BAM input
-
-    output:
-    path "*.sorted.markdup.bam"          // BAM with duplicates marked
-
-    script:
-    """
-    # Load Java and Picard tools
-    module load java/1.8
-    module load picard/2.27.5
-    
-    # Mark duplicate reads using Picard MarkDuplicates
-    # -Xmx32g: Allocate 32GB memory (essential for large datasets)
-    # I: Input BAM file
-    # O: Output BAM file with duplicates marked
-    # M: Metrics file with duplicate statistics
-    # REMOVE_DUPLICATES=false: Mark but don't remove duplicates
-    java -Xmx32g -jar \$PICARD MarkDuplicates \
-        I=${sorted_bam_file} \
-        O=${sorted_bam_file.baseName}.markdup.bam \
-        M=${sorted_bam_file.baseName}.metrics \
-        REMOVE_DUPLICATES=false
-    """
-}
-
-/**
- * PROCESS: bamStats
- * PURPOSE: Generate alignment statistics for quality assessment
- * TOOL: BAMtools v170119
- * INPUT: BAM file with marked duplicates
- * OUTPUT: Alignment statistics file
- */
-process bamStats {
-    input:
-    path markdup_bam_file                // BAM file with marked duplicates
-
-    output:
-    path "*.sorted.markdup.stats"        // Alignment statistics output
-
-    script:
-    """
-    # Load BAMtools for alignment statistics
-    module load bamtools/170119
-    
-    # Generate comprehensive alignment statistics
-    # Including: read counts, mapping rates, insert sizes, etc.
-    bamtools stats -in ${markdup_bam_file} > ${markdup_bam_file.baseName}.stats
-    """
-}
-
-/**
- * PROCESS: indexBam
- * PURPOSE: Create BAM index for random access (required for GATK tools)
- * TOOL: SAMtools v1.17
- * INPUT: BAM file with marked duplicates
- * OUTPUT: BAM index file (.bai)
- */
-process indexBam {
-    input:
-    path markdup_bam_file                // BAM file to index
-
-    output:
-    path "*.sorted.markdup.bam.bai"      // BAM index output
-
-    script:
-    """
-    # Load SAMtools for indexing
-    module load samtools/1.17
-    
-    # Create BAM index for random access
-    # Required by GATK tools for efficient BAM file access
-    samtools index ${markdup_bam_file}
-    """
-}
-
-/**
- * PROCESS: addreadGroups
- * PURPOSE: Add read group metadata required by GATK tools
- * TOOL: Picard AddOrReplaceReadGroups v2.27.5
- * INPUT: BAM file with marked duplicates
- * OUTPUT: BAM file with read group information
- */
-process addreadGroups {
-    input:
-    path markdup_bam_file                // Input BAM file
-
-    output:
-    path "*.sorted.markdup.rg.bam"       // BAM with read groups added
-
-    script:
-    """
-    # Load Picard and SAMtools
-    module load picard/2.27.5
-    module load samtools/1.17
-    
-    # Add read group metadata required by GATK
-    # SO=coordinate: Sort order is coordinate-based
-    # RGID: Read group identifier
-    # RGLB: Library identifier
-    # RGPL: Platform (illumina)
-    # RGSM: Sample name (ERR166333)
-    # RGPU: Platform unit identifier
-    # CREATE_INDEX=true: Create BAM index automatically
-    java -jar \$PICARD AddOrReplaceReadGroups \
-        INPUT=${markdup_bam_file} \
-        OUTPUT=${markdup_bam_file.baseName}.rg.bam \
-        SO=coordinate \
-        RGID=1 \
-        RGLB=lib1 \
-        RGPL=illumina \
-        RGSM=ERR166333 \
-        RGPU=unit1 \
-        CREATE_INDEX=true
-    """
-}
-
-//==============================================================================
-// PROCESS DEFINITIONS - REFERENCE GENOME PREPARATION
-//==============================================================================
-
-/**
- * PROCESS: indexReference
- * PURPOSE: Create FASTA index for reference genome (required for GATK)
- * TOOL: SAMtools v1.3.1
- * INPUT: Reference FASTA file
- * OUTPUT: FASTA index (.fai file)
- */
-process indexReference {
-    // Publish index to output directory for reuse
-    publishDir params.index_dir, mode: 'copy'
-
-    input: 
-    path fasta_file                      // Reference FASTA file
-
-    output:
-    path "*.fai"                         // FASTA index output
-
-    script:
-    """
-    # Load SAMtools for FASTA indexing
-    module load samtools/1.3.1
-    
-    # Create FASTA index for random access to reference genome
-    # Required by GATK tools for efficient reference access
-    samtools faidx ${fasta_file}
-    """
-}
-
-/**
- * PROCESS: indexKnownVariants
- * PURPOSE: Create index for known variants VCF file (required for BQSR)
- * TOOL: GATK v4.1.2.0
- * INPUT: Known variants VCF file
- * OUTPUT: VCF index (.idx file)
- */
-process indexKnownVariants {
-    // Publish index to output directory for reuse
-    publishDir params.index_dir, mode: 'copy'
-
-    input:
-    path vcf_file                        // Known variants VCF file
-
-    output:
-    path "${vcf_file}.idx"               // VCF index output
-
-    script:
-    """
-    # Load GATK for VCF indexing
-    module load GATK/4.1.2.0
-    
-    # Create VCF index for known variants file
-    # Required for Base Quality Score Recalibration (BQSR)
-    gatk IndexFeatureFile -F ${vcf_file}
-    """
-}
-
-/**
- * PROCESS: createSequenceDictionary
- * PURPOSE: Create sequence dictionary for reference genome (required by GATK)
- * TOOL: Picard CreateSequenceDictionary v2.27.5
- * INPUT: Reference FASTA file
- * OUTPUT: Sequence dictionary (.dict file)
- */
-process createSequenceDictionary {
-    // Publish dictionary to output directory for reuse
-    publishDir params.index_dir, mode: 'copy'
-
-    input: 
-    path fasta_file                      // Reference FASTA file
+process referenceDownload {
+    tag "Downloading the reference genome"
 
     output: 
-    path "*.dict"                        // Sequence dictionary output
+    path 'Homo_sapiens_assembly38.fasta', emit: ref_genome
 
     script:
     """
-    # Load Picard for sequence dictionary creation
-    module load picard/2.27.5
-    
-    # Create sequence dictionary containing chromosome information
-    # R: Reference FASTA file
-    # O: Output dictionary file
-    # Required by GATK tools for reference genome validation
-    java -jar \$PICARD CreateSequenceDictionary \
-        R=${fasta_file} \
-        O=${fasta_file.baseName}.dict
+    wget https://storage.googleapis.com/gcp-public-data--broad-references/hg38/v0/Homo_sapiens_assembly38.fasta
     """
 }
 
-//==============================================================================
-// PROCESS DEFINITIONS - BASE QUALITY SCORE RECALIBRATION (BQSR)
-//==============================================================================
+process editRefGenome {
 
-/**
- * PROCESS: baseRecalibrator
- * PURPOSE: Analyze systematic base quality score errors for recalibration
- * TOOL: GATK BaseRecalibrator v4.1.2.0
- * INPUT: BAM with read groups, reference genome, known variants
- * OUTPUT: Recalibration table with quality score corrections
- */
-process baseRecalibrator {
-    input: 
-    path bam_file                        // BAM file with read groups
-    path fasta_file                      // Reference genome filename
-    path known_sites_vcf                 // Known variants for recalibration
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+    input:
+    path ref_genome
 
     output:
-    path "*.recal_data.table"            // Base recalibration table
+    path "combined_ref.fa", emit: chr_edited
 
     script:
     """
-    # Load GATK for base quality recalibration
-    module load GATK/4.1.2.0
+    samtools faidx ${ref_genome} \
+    chr1 > combined_ref.fa
+    """
+}
+
+process indexFastaBWA {
+
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+
+    input:
+    path ref_genome
+
+    output:
+    tuple path(ref_genome), path ("${ref_genome}.*"), emit: reference_group
+
+    script:
+    """
+    bwa index -a bwtsw $ref_genome
+    """
+}
+
+process fastqTrim{
+
+    tag "$fastq_id"
+
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+
     
-    # Analyze systematic base quality score errors
-    # -I: Input BAM file
-    # -R: Reference genome
-    # --known-sites: Known variants to exclude from analysis
-    # -O: Output recalibration table
+    input:
+    tuple val (fastq_id), path(fastq_1), path (fastq_2)  // Paired-end FASTQ input files
+    path adapter_file 
+
+    output:
+    tuple val(fastq_id), path("${fastq_id}.R1.trimmed.fastq.gz"), path("${fastq_id}.R2.trimmed.fastq.gz")
+
+    script:
+    """
+    trimmomatic PE -phred33 \
+    ${fastq_1} ${fastq_2} \
+    ${fastq_id}.R1.trimmed.fastq.gz ${fastq_id}.R1.unpaired.fastq.gz \
+    ${fastq_id}.R2.trimmed.fastq.gz ${fastq_id}.R2.unpaired.fastq.gz \
+    ILLUMINACLIP:${adapter_file}:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+    """
+}
+
+process performFastqc {
+
+    tag "Performing fastqc on $fastq_id"
+    publishDir params.out_dir, mode: 'copy', overwrite: true
+    container 'oras://community.wave.seqera.io/library/fastqc:0.12.1--104d26ddd9519960'
+
+    input:
+    tuple val (fastq_id), path(fastq_1), path (fastq_2)
+
+    output:
+    path("*_fastqc.*")
+
+    script:
+    """
+    fastqc ${fastq_1} ${fastq_2}
+    """
+}
+
+process refGeneMapping {
+    tag "mapping $fastq_id to reference genome"
+
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+
+    input:
+    tuple val (fastq_id), path(fastq_1), path (fastq_2), path(ref_genome), path(reference_files)
+
+    output:
+    tuple val (fastq_id), path("${fastq_id}.sam")
+
+    script:
+    """
+    bwa mem -R "@RG\\tID:${fastq_id}\\tSM:${fastq_id}\\tPL:ILLUMINA\\tLB:lib1" \
+    ${ref_genome} ${fastq_1} ${fastq_2} > ${fastq_id}.sam
+
+    """
+}
+
+process bamCreation {
+    tag "making bam file for $fastq_id"
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+
+    input:
+    tuple val (fastq_id), path(sam_file)
+
+    output:
+    tuple val (fastq_id), path("${fastq_id}.sorted.bam")
+
+    script:
+    """
+    samtools view -bS ${sam_file} > ${fastq_id}.bam
+    samtools sort -o ${fastq_id}.sorted.bam ${fastq_id}.bam 
+    """
+}
+
+process markDuplicates {
+    tag "Marking duplicates for $fastq_id"
+
+    container 'oras://community.wave.seqera.io/library/picard:3.4.0--2976616e7cbd4840'
+
+    input:
+    tuple val (fastq_id), path (bam_file)
+
+    output:
+    tuple val (fastq_id), path("${fastq_id}.sorted.markdup.bam"), path("${fastq_id}.sorted.metrics")
+
+    script:
+    """
+    picard MarkDuplicates \
+    I=${bam_file} O=${fastq_id}.sorted.markdup.bam \
+    M=${fastq_id}.sorted.metrics 
+    REMOVE_DUPLICATES=false
+    """
+
+}
+
+process bamStats {
+    tag "$fastq_id"
+
+    container 'oras://community.wave.seqera.io/library/bamtools:2.5.3--ad2f385a555ee16d'
+    input: 
+    tuple val(fastq_id), path (markdup_file), path(_)
+
+    output:
+    tuple val(fastq_id), path("${fastq_id}.sorted.markdup.stats")
+
+    script:
+    """
+    bamtools stats -in $markdup_file > ${fastq_id}.sorted.markdup.stats
+    """
+}
+
+process indexingBamFile {
+    tag "performing indexingBamFile on $fastq_id"
+
+    container 'oras://community.wave.seqera.io/library/bwa_samtools_trimmomatic:2827ad58b1521516'
+
+    input: 
+    tuple val(fastq_id), path (markdup_file), path(_)
+
+    output:
+    tuple val(fastq_id), path("${fastq_id}.sorted.markdup.bam.bai")
+
+    script:
+    """
+    samtools index ${markdup_file}
+    """
+}
+
+process addReadGroups {
+    tag "Adding read groups to $fastq_id"
+
+    container 'oras://community.wave.seqera.io/library/picard:3.4.0--2976616e7cbd4840'
+
+    input:
+    tuple val (fastq_id), path (markdup_file), path(_)
+
+    output:
+    tuple val(fastq_id), path("${fastq_id}.sorted.markup.rg.bam")
+
+    script:
+    """
+    picard AddOrReplaceReadGroups \
+    I=${markdup_file} O=${fastq_id}.sorted.markup.rg.bam SO=coordinate RGID=1 RGLB=libl RGPL=illumina RGPU=unit1 RGSM=${fastq_id} CREATE_INDEX=True
+    """
+}
+
+process indexReference {
+    tag "Indexing reference genome"
+    container 'oras://community.wave.seqera.io/library/gatk_samtools:0465b74d4eaac4e4'
+
+    input: 
+    path ref_genome
+
+    output:
+    path "*.fai", emit: indexed_ref_fai
+
+    script:
+
+    """
+    samtools faidx ${ref_genome}
+    """
+}
+
+process downloadMillsand1000G {
+    tag "Downloading Mills and 1000G gold standard indels VCF"
+    
+    output:
+    path 'Mills_and_1000G_gold_standard.indels.hg38.vcf.gz', emit: var_reference_gz
+
+    script:
+    """
+    wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz 
+    """
+
+}
+
+process indexVariantFile {
+    tag "Index variant reference panel"
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    path var_reference_gz
+
+    output:
+    tuple path(var_reference_gz), path('*.tbi'), emit: indexed_var_reference
+
+    script:
+    """
+    gatk IndexFeatureFile -I ${var_reference_gz}
+    """
+}
+
+process createSequenceDict {
+    tag "Create sequence dictionary"
+
+    container 'oras://community.wave.seqera.io/library/picard:3.4.0--2976616e7cbd4840'
+
+    input:
+    path ref_genome
+
+    output:
+    path 'combined_ref.dict', emit: reference_seq_dict
+
+    script:
+    """
+    picard CreateSequenceDictionary \
+    R=${ref_genome} \
+    O=combined_ref.dict
+    """
+}
+
+process createRecalModel {
+    tag "$fasta_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    tuple val(fasta_id), path(bam_with_readgroups), path(ref_genome), path(var_reference_gz), path(seq_dict), path(indexed_ref_fai), path(indexed_var_reference)
+
+    output:
+    tuple val(fasta_id), path("${fasta_id}.recal_data.table"), path(bam_with_readgroups), path(ref_genome), path(var_reference_gz), path(seq_dict), path(indexed_ref_fai), path(indexed_var_reference)
+
+    script:
+    """
     gatk BaseRecalibrator \
-        -I ${bam_file} \
-        -R ${params.index_dir}/${fasta_file} \
-        --known-sites ${params.index_dir}/${known_sites_vcf} \
-        -O ${bam_file.baseName}.recal_data.table
+        -I $bam_with_readgroups \
+        -R $ref_genome \
+        --known-sites $var_reference_gz \
+        -O ${fasta_id}.recal_data.table
     """
 }
 
-/**
- * PROCESS: applyBQSR
- * PURPOSE: Apply base quality score recalibration to BAM file
- * TOOL: GATK ApplyBQSR v4.1.2.0
- * INPUT: BAM file, reference genome, recalibration table
- * OUTPUT: BAM file with recalibrated base quality scores
- */
-process applyBQSR{
-    input:
-    path bam_file                        // Input BAM file
-    path fasta_file                      // Reference genome filename
-    path recal_table                     // Base recalibration table
+process recalBam {
+    tag "$fastq_id"
 
-    output:
-    path "*.recal.bam"                   // BAM with recalibrated qualities
-
-    script:
-    """
-    # Load GATK for applying base quality recalibration
-    module load GATK/4.1.2.0
-    
-    # Apply base quality score recalibration
-    # -R: Reference genome
-    # -I: Input BAM file
-    # --bqsr-recal-file: Recalibration table from BaseRecalibrator
-    # -O: Output BAM with corrected base qualities
-    gatk ApplyBQSR \
-        -R ${params.index_dir}/${fasta_file} \
-        -I ${bam_file} \
-        --bqsr-recal-file ${recal_table} \
-        -O ${bam_file.baseName}.recal.bam
-    """
-}
-
-//==============================================================================
-// PROCESS DEFINITIONS - VARIANT CALLING AND INDEXING
-//==============================================================================
-
-/**
- * PROCESS: haplotypeCaller
- * PURPOSE: Call SNPs and INDELs using GATK's local assembly approach
- * TOOL: GATK HaplotypeCaller v4.1.2.0
- * INPUT: Recalibrated BAM file, reference genome
- * OUTPUT: VCF file with variant calls
- */
-process haplotypeCaller {
-    // Publish VCF to output directory
-    publishDir params.index_dir, mode: 'copy'
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
 
     input:
-    path bam_file                        // Recalibrated BAM file
-    path fasta_file                      // Reference genome filename
+    tuple val(fastq_id), path(recal_file), path(bam_with_readgroups), path(ref_genome), path(indexed_var_reference), path(var_reference_gz), path(indexed_ref_fai), path(seq_dict)
 
     output:
-    path "*.vcf.gz"                      // Compressed VCF output
+    tuple val(fastq_id), path("${fastq_id}.sorted.markdup.rg.recal.bam"), path(ref_genome), path(indexed_ref_fai), path(seq_dict)
 
     script:
     """
-    # Load GATK and Java for variant calling
-    module load GATK/4.1.2.0
-    module load java/1.8
-    
-    # Call variants using HaplotypeCaller
-    # --java-options "-Xmx4g": Allocate 4GB memory
-    # -R: Reference genome
-    # -I: Input recalibrated BAM file
-    # -O: Output VCF file (compressed)
-    gatk --java-options "-Xmx4g" HaplotypeCaller \
-        -R ${params.index_dir}/${fasta_file} \
-        -I ${bam_file} \
-        -O ${bam_file.baseName}.vcf.gz
+    gatk ApplyBQSR -R $ref_genome -I $bam_with_readgroups --bqsr-recal-file $recal_file -O ${fastq_id}.sorted.markdup.rg.recal.bam
     """
+
 }
 
-/**
- * PROCESS: indexVCF
- * PURPOSE: Create index for VCF file (required for downstream tools)
- * TOOL: GATK IndexFeatureFile v4.1.2.0
- * INPUT: VCF file from HaplotypeCaller
- * OUTPUT: VCF index (.tbi file)
- */
-process indexVCF {
-    // Publish index to output directory
-    publishDir params.index_dir, mode: 'copy'
 
-    input: 
-    path vcf_file                        // VCF file to index
+process callVariants {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    tuple val(fastq_id), path(recal_bam), path(ref_genome), path(indexed_ref_fai), path(seq_dict)
 
     output:
-    path "*.vcf.gz.tbi"                  // VCF index output
+    tuple val(fastq_id), path("*.vcf.gz"), path(recal_bam), path(ref_genome), path(indexed_ref_fai), path(seq_dict)
 
     script:
     """
-    # Load GATK and Java for VCF indexing
-    module load GATK/4.1.2.0
-    module load java/1.8
-
-    # Create VCF index for random access
-    # Required by downstream GATK tools
-    gatk IndexFeatureFile -F ${vcf_file}
+    gatk --java-options "-Xmx4g" HaplotypeCaller -R ${ref_genome} -I ${recal_bam} -O ${fastq_id}.vcf.gz    
     """
 }
 
-//==============================================================================
-// PROCESS DEFINITIONS - VARIANT FILTERING AND REFINEMENT
-//==============================================================================
 
-/**
- * PROCESS: filterVariants
- * PURPOSE: Select SNPs and apply hard quality filters
- * TOOL: GATK SelectVariants + VariantFiltration v4.1.2.0
- * INPUT: Trigger value (workflow coordination)
- * OUTPUT: Filtered SNP VCF file
- */
+process downloadVariantArrays {
+    tag "Download 1000 genome vcf"
+    input:    
+
+    output:
+    path '1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf', emit: variant_array_vcf
+    path '1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf.idx', emit: variant_array_idx
+
+    script:
+    """
+    wget https://storage.googleapis.com/gcp-public-data--broad-references/hg38/v0/1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf
+    wget https://storage.googleapis.com/gcp-public-data--broad-references/hg38/v0/1000G.phase3.integrated.sites_only.no_MATCHED_REV.hg38.vcf.idx
+    """
+}
+
+process indexCalledVariants {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    tuple val(fastq_id), path(vcf_file), path(recal_bam), path(ref_genome), path(indexed_ref_fai), path(seq_dict)
+
+    output:
+    tuple val(fastq_id), path(vcf_file), path('*.tbi'), emit: indexed_vcf
+
+    script:
+    """
+    gatk IndexFeatureFile -I ${vcf_file}
+    """
+}
+
+process purgeIndels {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    tuple val(fastq_id), path(vcf_file), path(indexed_vcf)
+
+    output:
+    tuple val(fastq_id), path("*snp.vcf.gz"), path(vcf_file), path(indexed_vcf)
+
+    script:
+    """
+    gatk SelectVariants --variant ${vcf_file} --select-type SNP --output ${fastq_id}.snp.vcf.gz
+    """
+}
+
+process indexSNPS {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
+    input:
+    tuple val(fastq_id), path(snp_vcf), path(vcf_file), path(indexed_vcf)
+
+    output:
+    tuple val(fastq_id), path(snp_vcf), path('*.tbi'), emit: indexed_snp_vcf
+
+    script:
+    """
+    gatk IndexFeatureFile -I ${snp_vcf}
+    """
+}
+
 process filterVariants {
-    // Publish filtered VCF to output directory
-    publishDir params.index_dir, mode: 'copy'
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
 
     input:
-    val trigger                          // Dummy input for workflow coordination
+    tuple val(fastq_id), path(snp_vcf), path(indexed_snp_vcf)
 
     output:
-    path "*.snp.filtered.vcf.gz"         // Filtered SNP VCF output
+    tuple val(fastq_id), path("*.snp.filtered.vcf.gz"), path(snp_vcf), path(indexed_snp_vcf)
 
     script:
-    // Extract base filename for consistent naming
-    def filename = params.filtered_vcf_file
-    def base_name = filename.substring(0, filename.lastIndexOf('.vcf.gz'))
-
     """
-    # Load GATK and Java for variant filtering
-    module load GATK/4.1.2.0
-    module load java/1.8
-
-    # Step 1: Select only SNPs from the VCF file
-    # --variant: Input VCF file with all variants
-    # --select-type SNP: Select only single nucleotide polymorphisms
-    # --output: Output VCF with SNPs only
-    gatk SelectVariants \
-        --variant ${params.index_dir}/${params.filtered_vcf_file} \
-        --select-type SNP \
-        --output ${base_name}.snp.vcf.gz
-
-    # Step 2: Apply hard quality filters to SNPs
-    # Filter expressions based on GATK best practices for exome data:
-    # QD<2.0: Quality by Depth (variant confidence/read depth)
-    # QUAL<30.0: Overall variant quality score
-    # SOR>3.0: Strand Odds Ratio (strand bias detection)
-    # FS>60.0: Fisher Strand test (strand bias detection)
-    # MQ<40.0: Mapping Quality (alignment confidence)
-    # MQRankSum<-12.5: Mapping Quality Rank Sum test
-    # ReadPosRankSum<-8.0: Read Position Rank Sum test
-    gatk VariantFiltration \
-        --variant ${base_name}.snp.vcf.gz \
-        --filter-expression "QD<2.0" --filter-name "QD2" \
-        --filter-expression "QUAL<30.0" --filter-name "QUAL30" \
-        --filter-expression "SOR>3.0" --filter-name "SOR3" \
-        --filter-expression "FS>60.0" --filter-name "FS60" \
-        --filter-expression "MQ<40.0" --filter-name "MQ40" \
-        --filter-expression "MQRankSum<-12.5" --filter-name "MQRankSum-12.5" \
-        --filter-expression "ReadPosRankSum<-8.0" --filter-name "ReadPosRankSum-8" \
-        --output ${base_name}.snp.filtered.vcf.gz
+    gatk VariantFiltration  --variant $snp_vcf --filter-expression "QD<2.0" --filter-name "QD2" --filter-expression "QUAL<30.0" --filter-name "QUAL30"  --filter-expression "SOR>3.0" --filter-name "SOR3" --filter-expression "FS>60.0" --filter-name "FS60" --filter-expression "MQ<40.0" --filter-name "MQ40" --filter-expression "MQRankSum<-12.5" --filter-name "MQRankSum-12.5" --filter-expression "ReadPosRankSum<-8.0" --filter-name "ReadPosRankSum-8" --output ${fastq_id}.snp.filtered.vcf.gz
     """
 }
 
-/**
- * PROCESS: indexFilteredVCF
- * PURPOSE: Create index for filtered VCF file
- * TOOL: GATK IndexFeatureFile v4.1.2.0
- * INPUT: Trigger value (workflow coordination)
- * OUTPUT: Index for filtered VCF file
- */
-process indexFilteredVCF {
-    // Publish index to output directory
-    publishDir params.index_dir, mode: 'copy'
+process indexVCF {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
 
     input:
-    val trigger                          // Dummy input for workflow coordination
+    tuple val(fastq_id), path(filtered_vcf_file), path(vcf_file), path(indexed_vcf)
 
     output:
-    path "*.vcf.gz.tbi"                  // Filtered VCF index output
+    tuple val(fastq_id), path(filtered_vcf_file), path('*.tbi'), emit: filtered_indexed_vcf
 
     script:
-    // Extract base filename for consistent naming
-    def filename = params.final_vcf
-    def base_name = filename.substring(0, filename.lastIndexOf('.vcf.gz'))
-
     """
-    # Load GATK and Java for VCF indexing
-    module load GATK/4.1.2.0
-    module load java/1.8
-
-    # Create symbolic link to filtered VCF in working directory
-    # Required because GATK creates index in same directory as VCF
-    ln -sf ${params.index_dir}/${params.final_vcf} ${base_name}.vcf.gz
-
-    # Create index for filtered VCF file
-    gatk IndexFeatureFile -F ${base_name}.vcf.gz
+    gatk IndexFeatureFile -I ${filtered_vcf_file}
     """
 }
 
-/**
- * PROCESS: calculateGenotypePosteriors
- * PURPOSE: Refine genotype calls using population allele frequencies
- * TOOL: GATK CalculateGenotypePosteriors v4.1.2.0
- * INPUT: Trigger value, population reference VCF and index
- * OUTPUT: VCF with refined genotype posterior probabilities
- */
-process calculateGenotypePosteriors {
-    // Publish refined VCF to output directory
-    publishDir params.index_dir, mode: 'copy'
-    
+process calcGenotypePosteriors {
+    tag "$fastq_id"
+
+    container '/shared/home1/c.c24053373/pipeline/singularity_cache/gatk_4.5.0.0.sif'
+
     input:
-    val trigger                          // Dummy input for workflow coordination
-    path supporting_vcf                  // Population reference VCF (1000 Genomes)
-    path supporting_vcf_idx              // Population reference VCF index
+    tuple val(fastq_id), path(snp_vcf), path(indexed_snp_vcf), path(thousand_genome_vcf), path(thousand_genome_vcf_idx)
 
     output:
-    path "*.ref.vcf.gz"                  // VCF with posterior probabilities
+    tuple val(fastq_id), path("*.snp.filtered.ref.vcf.gz"), path(thousand_genome_vcf), path(thousand_genome_vcf_idx), emit: refined_vcf
 
     script:
-    // Extract base filename for consistent naming
-    def filename = params.final_vcf
-    def base_name = filename.substring(0, filename.lastIndexOf('.vcf.gz'))
-
     """
-    # Load GATK and Java for posterior calculation
-    module load GATK/4.1.2.0
-    module load java/1.8
-
-    # Calculate genotype posterior probabilities using population data
-    # --java-options "-Xmx4g": Allocate 4GB memory
-    # -V: Input filtered VCF file
-    # -O: Output VCF with posterior probabilities
-    # -supporting: Population reference VCF (1000 Genomes Project)
     gatk --java-options "-Xmx4g" CalculateGenotypePosteriors \
-        -V ${params.index_dir}/${params.final_vcf} \
-        -O ${base_name}.ref.vcf.gz \
-        -supporting ${supporting_vcf}
+    -V ${snp_vcf} \
+    -O ${fastq_id}.snp.filtered.ref.vcf.gz \
+    -supporting ${thousand_genome_vcf}
     """
 }
 
-//==============================================================================
-// PROCESS DEFINITIONS - VARIANT ANNOTATION
-//==============================================================================
-
-/**
- * PROCESS: annotateVariants
- * PURPOSE: Add functional annotations to variants using multiple databases
- * TOOL: ANNOVAR v20210525
- * INPUT: Trigger value, ANNOVAR database directory
- * OUTPUT: Comprehensively annotated VCF file
- */
-process annotateVariants {
-    // Publish annotated VCF to output directory
-    publishDir params.index_dir, mode: 'copy'
+process variantAnnotation {
+    tag "$fastq_id"
 
     input:
-    val trigger                          // Dummy input for workflow coordination
-    path annovar_db                      // ANNOVAR database directory
+    tuple val(fastq_id), path(refined_vcf_file), path(thousand_genome_vcf), path(thousand_genome_vcf_idx)
 
     output:
-    path "*.annot.vcf.gz"                // Annotated VCF output
+    path "*.hg38_multianno.txt"
+    path "*.hg38_multianno.vcf"
+
+    container '/scratch/SCWF00079/shared/navneet/pipeline/annovar_2018Apr16.sif'
+
+    publishDir params.out_dir, mode: 'copy', overwrite: true
 
     script:
-    // Extract base filename for consistent naming
-    def filename = params.final_vcf
-    def base_name = filename.substring(0, filename.lastIndexOf('.vcf.gz'))
-
     """
-    # Load ANNOVAR for variant annotation
-    module load annovar/20210525
 
-    # Annotate variants using multiple ANNOVAR databases
-    # Input: VCF with refined genotype posteriors
-    # -buildver hg38: Use GRCh38/hg38 genome build
-    # -out: Output file prefix
-    # -remove: Remove temporary files after completion
-    # -protocol: Annotation databases to use:
-    #   - refGene: Gene-based annotation (transcripts, consequences)
-    #   - cytoBand: Cytogenetic band information
-    #   - avsnp150: dbSNP build 150 (variant IDs, frequencies)
-    #   - clinvar_20210501: ClinVar clinical significance (May 2021)
-    # -operation: Annotation types (g=gene-based, r=region-based, f=filter-based)
-    # -nastring .: Use '.' for missing annotations
-    # -vcfinput: Input is in VCF format
-    table_annovar.pl \
-        ${params.index_dir}/${base_name}.ref.vcf.gz \
-        ${annovar_db} \
+    # Download necessary ANNOVAR databases (e.g., refGene, avsnp150, clinvar)
+    #[ ! -f humandb/hg38_refGene.txt ] && annotate_variation.pl -downdb -buildver hg38 -webfrom annovar refGene humandb/
+    #[ ! -f humandb/hg38_cytoBand.txt ] && annotate_variation.pl -build hg38 -downdb cytoBand humandb/
+    #[ ! -f humandb/hg38_avsnp150.txt ] && annotate_variation.pl -downdb -buildver hg38 -webfrom annovar avsnp150 humandb/
+    #[ ! -f humandb/hg38_clinvar.txt ] && annotate_variation.pl -downdb -buildver hg38 -webfrom annovar clinvar_20250721 humandb/
+
+    # Convert VCF to ANNOVAR input format
+    convert2annovar.pl -format vcf4 ${refined_vcf_file} > ${refined_vcf_file.baseName}.avinput
+
+    # Annotate variants using ANNOVAR
+        table_annovar.pl \
+        ${refined_vcf_file} \
+        /scratch/SCWF00079/shared/navneet/pipeline/humandb \
         -buildver hg38 \
-        -out ${base_name}.ref \
+        -out ${refined_vcf_file.baseName} \
         -remove \
-        -protocol refGene,cytoBand,avsnp150,clinvar_20210501 \
+        -protocol refGene,cytoBand,avsnp150,clinvar_20250721 \
         -operation g,r,f,f \
         -nastring . \
         -vcfinput
+        
 
-    # Compress the annotated VCF file and rename for consistency
-    gzip ${base_name}.ref.hg38_multianno.vcf
-    mv ${base_name}.ref.hg38_multianno.vcf.gz ${base_name}.ref.annot.vcf.gz
     """
 }
 
-//==============================================================================
-// WORKFLOW DEFINITION - PROCESS ORCHESTRATION AND DATA FLOW
-//==============================================================================
 
 workflow {
-    //--------------------------------------------------------------------------
-    // INPUT DATA PREPARATION
-    //--------------------------------------------------------------------------
-    // Create channel for FASTQ input files
-    // Maps sample IDs to paired-end FASTQ file paths
-    fastq_ch = Channel
-               .from(params.fastq_id)
-               // Map sample ID to paired FASTQ file paths
-               .map { id -> tuple("/scratch/c.c24053373/test/${id}_1.fastq", "/scratch/c.c24053373/test/${id}_2.fastq") }
 
-    //--------------------------------------------------------------------------
-    // PHASE 1: QUALITY CONTROL AND READ PREPROCESSING
-    //--------------------------------------------------------------------------
-    // Trim low-quality bases and adapters from raw FASTQ files
-    trimmed_fastq_ch = fastqTrim(fastq_ch)
+    ref_genome = referenceDownload()
 
-    // Generate quality control reports for trimmed reads
-    FASTQC(trimmed_fastq_ch)
+    chr_edited = editRefGenome(ref_genome)
 
-    //--------------------------------------------------------------------------
-    // PHASE 2: READ ALIGNMENT AND BAM PROCESSING
-    //--------------------------------------------------------------------------
-    // Set up channels for reference genome alignment
-    index_ch = Channel.fromPath(params.index_dir)        // Reference directory
-    ref_ch = Channel.of(params.fasta_file)               // Reference filename
+    indexed_reference = indexFastaBWA(chr_edited)
+
+    adapter_ch = file(params.adapter_file)
+
+    fastq_ch = Channel.fromFilePairs("data/*_{1,2}*.fastq.gz")
+                      .map { sample_id, reads -> tuple(sample_id, reads[0], reads[1]) }
+
+    fastq_ch.view { "FASTQ ID: ${it[0]}, Read 1: ${it[1]}, Read 2: ${it[2]}" }
+    trim_output = fastqTrim(fastq_ch, adapter_ch)
+
+    performFastqc(trim_output)
+
+    mapping_input = trim_output.combine(indexed_reference)
+
+    mapped_data = refGeneMapping(mapping_input)
+
+    bam_file = bamCreation(mapped_data)
+
+    markedup_files = markDuplicates(bam_file)
+
+    bamStats_report = bamStats(markedup_files)
+
+    indexed_bam = indexingBamFile(markedup_files)
+
+    bam_with_readgroups = addReadGroups(markedup_files)
+
+    reference_fai_file = indexReference(chr_edited)
+
+    var_reference_gz = downloadMillsand1000G()
+
+    indexed_var_reference = indexVariantFile(var_reference_gz)
+
+    seq_dict = createSequenceDict(chr_edited)
+
+    recalibration_inputs = bam_with_readgroups
+        .combine(chr_edited.collect())        // add FASTA
+        .combine(indexed_var_reference.collect())   // add known-sites VCF
+        .combine(reference_fai_file.collect()) // add .fai
+        .combine(seq_dict.collect())
+        .map { fastq_id, bam, fasta, vcf, fai, seq_dict, indexed_ref_fai->
+        tuple(fastq_id, bam, fasta, vcf, fai, seq_dict, indexed_ref_fai)
+        }
     
-    // Align trimmed reads to reference genome using BWA-MEM
-    sam_ch = genomeMap(index_ch, ref_ch, trimmed_fastq_ch)
+    recal_file = createRecalModel(recalibration_inputs)
 
-    // Convert SAM to sorted BAM format
-    sorted_bam_ch = sortBam(sam_ch)
+    recal_bam = recalBam(recal_file)
 
-    // Mark PCR and optical duplicate reads
-    markdup_bam_ch = markDuplicates(sorted_bam_ch)
+    vcf_file = callVariants(recal_bam)
 
-    // Generate alignment statistics for quality assessment
-    bamStats(markdup_bam_ch)
+    thousand_genome_vcf = downloadVariantArrays()
 
-    // Create BAM index for random access (required for IGV visualization)
-    bamIndex_ch = indexBam(markdup_bam_ch)
+    indexed_vcf = indexCalledVariants(vcf_file)
 
-    // Add read group metadata required by GATK tools
-    readgroup_bam_ch = addreadGroups(markdup_bam_ch)
+    snp_vcf = purgeIndels(indexed_vcf)
 
-    //--------------------------------------------------------------------------
-    // PHASE 3: REFERENCE GENOME PREPARATION (PARALLEL PROCESSING)
-    //--------------------------------------------------------------------------
-    // These processes run in parallel as they're independent
-    
-    // Create FASTA index for reference genome
-    fasta_index_ch = indexReference(Channel.fromPath("${params.index_dir}/${params.fasta_file}"))
+    indexed_snp_vcf = indexSNPS(snp_vcf)
 
-    // Create index for known variants VCF (required for BQSR)
-    known_variants_ch = indexKnownVariants(Channel.fromPath("${params.index_dir}/${params.vcf_file}"))
+    filtered_variants = filterVariants(indexed_snp_vcf) 
 
-    // Create sequence dictionary for reference genome
-    fasta_dict_ch = createSequenceDictionary(Channel.fromPath("${params.index_dir}/${params.fasta_file}"))
+    indexed_filtered_vcf = indexVCF(filtered_variants)
 
-    //--------------------------------------------------------------------------
-    // PHASE 4: BASE QUALITY SCORE RECALIBRATION (BQSR)
-    //--------------------------------------------------------------------------
-    // Analyze systematic base quality score errors
-    recal_table_ch = baseRecalibrator(
-        readgroup_bam_ch,                                // BAM with read groups
-        Channel.fromPath("${params.fasta_file}"),        // Reference genome
-        Channel.fromPath("${params.vcf_file}")           // Known variants
-    )
+    refining_input = indexed_filtered_vcf
+                    .combine(thousand_genome_vcf.variant_array_vcf.collect())
+                    .combine(thousand_genome_vcf.variant_array_idx.collect())
 
-    // Apply base quality score recalibration to BAM file
-    recal_bam_ch = applyBQSR(
-        readgroup_bam_ch,                                // Input BAM
-        Channel.fromPath("${params.fasta_file}"),        // Reference genome
-        recal_table_ch                                   // Recalibration table
-    )
+    refined_vcf = calcGenotypePosteriors(refining_input)
 
-    //--------------------------------------------------------------------------
-    // PHASE 5: VARIANT CALLING AND INDEXING
-    //--------------------------------------------------------------------------
-    // Call variants using GATK HaplotypeCaller
-    vcf_ch = haplotypeCaller(
-        recal_bam_ch,                                    // Recalibrated BAM
-        Channel.fromPath("${params.fasta_file}")         // Reference genome
-    )
-    
-    // Create index for raw VCF file
-    indexed_vcf_ch = indexVCF(vcf_ch)
-
-    //--------------------------------------------------------------------------
-    // PHASE 6: VARIANT FILTERING AND REFINEMENT (SEQUENTIAL PROCESSING)
-    //--------------------------------------------------------------------------
-    // Create workflow coordination triggers to ensure proper execution order
-    
-    // Wait for variant calling to complete before filtering
-    haplotype_done = vcf_ch.collect().map { "step1_done" }
-    
-    // Filter variants (select SNPs and apply quality filters)
-    filtered_vcf_ch = filterVariants(haplotype_done)
-    
-    // Wait for variant filtering to complete before indexing
-    filter_done = filtered_vcf_ch.collect().map { "step2_done" }
-    
-    // Create index for filtered VCF file
-    indexed_filtered_vcf_ch = indexFilteredVCF(filter_done)
-
-    // Wait for filtered VCF indexing to complete
-    index_done = indexed_filtered_vcf_ch.collect().map { "step3_done" }
-
-    //--------------------------------------------------------------------------
-    // PHASE 7: GENOTYPE REFINEMENT USING POPULATION DATA
-    //--------------------------------------------------------------------------
-    // Calculate genotype posterior probabilities using 1000 Genomes data
-    posterior_vcf_ch = calculateGenotypePosteriors(
-        index_done,                                      // Wait for previous step
-        Channel.fromPath("${params.index_dir}/${params.supporting_vcf}"),     // 1000G VCF
-        Channel.fromPath("${params.index_dir}/${params.supporting_vcf}.idx")  // 1000G index
-    )
-    
-    //--------------------------------------------------------------------------
-    // PHASE 8: COMPREHENSIVE VARIANT ANNOTATION
-    //--------------------------------------------------------------------------
-    // Wait for genotype posterior calculation to complete
-    posterior_done = posterior_vcf_ch.collect().map { "step4_done" }
-    
-    // Add functional annotations using ANNOVAR databases
-    annotated_vcf_ch = annotateVariants(
-        posterior_done,                                  // Wait for previous step
-        Channel.fromPath("${params.annovar_db}")         // ANNOVAR database directory
-    )
+    annotation_results = variantAnnotation(refined_vcf)
 }
 
-//==============================================================================
-// END OF PIPELINE
-// Final output: Comprehensively annotated VCF file ready for clinical interpretation
-// and breast cancer susceptibility gene analysis
-//==============================================================================
+
+
